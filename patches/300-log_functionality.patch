@@ -136,7 +136,7 @@ Index: miniupnpd-2.1.20200510/upnpsoap.c
  	case -3:	/* not permitted */
  #ifdef IGD_V2
  		SoapError(h, 606, "Action not authorized");
-+		syslog(LOG_DEBUG, "LLL %d %d", eport, iport); write_to_log("Action not authorized", int_ip, eport);
++		write_to_log("Action not authorized", int_ip, eport);
  		break;
  #endif /* IGD_V2 */
  	case -2:	/* already redirected */
