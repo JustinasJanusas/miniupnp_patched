@@ -1,0 +1,211 @@
+Index: miniupnpd-2.1.20200510/upnpsoap.c
+===================================================================
+--- miniupnpd-2.1.20200510.orig/upnpsoap.c
++++ miniupnpd-2.1.20200510/upnpsoap.c
+@@ -19,6 +19,7 @@
+ #include <arpa/inet.h>
+ #include <netdb.h>
+ #include <ctype.h>
++#include <sqlite3.h>
+ 
+ #include "macros.h"
+ #include "config.h"
+@@ -370,6 +371,82 @@ GetExternalIPAddress(struct upnphttp * h
+ 	BuildSendAndCloseSoapResp(h, body, bodylen);
+ }
+ 
++
++#define LOG_FILE_PATH "/var/log/upnp_error_logs.db"
++static sqlite3 *db_con = NULL;
++
++static int run_single_query(char *query, int argc, char *argv[])
++{
++	
++	
++	
++	sqlite3_stmt *res;
++	int rc = 0;
++	rc = sqlite3_prepare(db_con, query,
++			-1, &res, 0);
++	if (rc != SQLITE_OK) { 
++        	return 1;
++	}    
++	for(int i = 0; i < argc; i++){
++		if(i == 2)
++			sqlite3_bind_int(res, i+1, atoi(argv[i]));
++		else
++			sqlite3_bind_text(res, i+1, argv[i], strlen(argv[i]) , NULL);
++	}
++	rc = sqlite3_step(res);
++	if (rc != SQLITE_OK && rc != SQLITE_DONE)
++		return rc; 
++	sqlite3_clear_bindings(res);
++	sqlite3_reset(res);
++	sqlite3_finalize(res);	
++	return 0;
++}
++static int write_to_log(char *message, char *ip, int port)
++{
++	if( !db_con ){
++		return 1;
++	}
++	int rc = 0;
++	char char_port[10];
++	sprintf(char_port, "%d", port);
++
++	char buffer[1024];
++	snprintf(buffer, sizeof(buffer), "INSERT INTO PortOpenError(Message, "
++		"IP, Port) VALUES (?, ?, ?)");
++	char *args[3] = {message, ip, char_port};
++
++	rc = run_single_query(buffer, 3, args);
++	return rc;
++}
++
++static int db_setup()
++{ 
++	int rc = 0;
++	rc = run_single_query("CREATE TABLE IF NOT EXISTS PortOpenError ( ID integer NOT NULL " 
++			"PRIMARY KEY AUTOINCREMENT , Message TEXT(100), IP TEXT(50), Port integer, "
++			"Time datetime DEFAULT CURRENT_TIMESTAMP); ", 0, NULL);
++	if(rc != SQLITE_OK && rc != SQLITE_DONE)
++		return rc;
++	return 0;
++}
++int close_log()
++{
++	sqlite3_close(db_con);
++	return 0;
++}
++int init_log() 
++{
++	int rc = 0;
++	rc = sqlite3_open(LOG_FILE_PATH, &db_con);
++	if(rc){
++		sqlite3_close(db_con);
++		return rc;
++	}
++	rc = db_setup();
++	return rc;
++}
++
++
+ /* AddPortMapping method of WANIPConnection Service
+  * Ignored argument : NewEnabled */
+ static void
+@@ -409,6 +486,7 @@ AddPortMapping(struct upnphttp * h, cons
+ 	{
+ 		ClearNameValueList(&data);
+ 		SoapError(h, 402, "Invalid Args");
++		write_to_log("Invalid Args", "127.0.0.1", 80);
+ 		return;
+ 	}
+ #endif
+@@ -422,6 +500,8 @@ AddPortMapping(struct upnphttp * h, cons
+ 	{
+ 		ClearNameValueList(&data);
+ 		SoapError(h, 726, "RemoteHostOnlySupportsWildcard");
++		write_to_log("RemoteHostOnlySupportsWildcard", "", -1);
++
+ 		return;
+ 	}
+ #endif
+@@ -456,6 +536,7 @@ AddPortMapping(struct upnphttp * h, cons
+ 			syslog(LOG_ERR, "Failed to convert hostname '%s' to ip address", int_ip);
+ 			ClearNameValueList(&data);
+ 			SoapError(h, 402, "Invalid Args");
++			write_to_log("Invalid Args", "", -1);
+ 			return;
+ 		}
+ 	}
+@@ -469,6 +550,7 @@ AddPortMapping(struct upnphttp * h, cons
+ 			       inet_ntoa(h->clientaddr), int_ip);
+ 			ClearNameValueList(&data);
+ 			SoapError(h, 718, "ConflictInMappingEntry");
++			write_to_log("ConflictInMappingEntry", int_ip, -1);
+ 			return;
+ 		}
+ 	}
+@@ -550,18 +632,22 @@ AddPortMapping(struct upnphttp * h, cons
+ 	case -4:
+ #ifdef IGD_V2
+ 		SoapError(h, 729, "ConflictWithOtherMechanisms");
++		write_to_log("ConflictWithOtherMachain", int_ip, eport);
+ 		break;
+ #endif /* IGD_V2 */
+ 	case -3:	/* not permitted */
+ #ifdef IGD_V2
+ 		SoapError(h, 606, "Action not authorized");
++		syslog(LOG_DEBUG, "LLL %d %d", eport, iport); write_to_log("Action not authorized", int_ip, eport);
+ 		break;
+ #endif /* IGD_V2 */
+ 	case -2:	/* already redirected */
+ 		SoapError(h, 718, "ConflictInMappingEntry");
++		write_to_log("ConflictInMappingEntry", int_ip, eport);
+ 		break;
+ 	default:
+ 		SoapError(h, 501, "ActionFailed");
++		write_to_log("ActionFailed", int_ip, eport);
+ 	}
+ }
+ 
+Index: miniupnpd-2.1.20200510/upnpsoap.h
+===================================================================
+--- miniupnpd-2.1.20200510.orig/upnpsoap.h
++++ miniupnpd-2.1.20200510/upnpsoap.h
+@@ -19,5 +19,8 @@ ExecuteSoapAction(struct upnphttp *, con
+ void
+ SoapError(struct upnphttp * h, int errCode, const char * errDesc);
+ 
++int init_log(void);
++int close_log(void);
++
+ #endif
+ 
+Index: miniupnpd-2.1.20200510/Makefile.linux
+===================================================================
+--- miniupnpd-2.1.20200510.orig/Makefile.linux
++++ miniupnpd-2.1.20200510/Makefile.linux
+@@ -93,7 +93,7 @@ else
+ $(info please install uuid-dev package / libuuid)
+ endif # ($(TEST),1)
+ endif # ($(TARGET_OPENWRT,)
+-
++LDLIBS += -lsqlite3
+ GLIBC_VERSION := $(shell ldd --version | head -n 1 | sed 's/^.* //')
+ GLIBC_VERSION_MAJOR = $(shell echo $(GLIBC_VERSION) | cut -f 1 -d . )
+ GLIBC_VERSION_MINOR = $(shell echo $(GLIBC_VERSION) | cut -f 2 -d . )
+Index: miniupnpd-2.1.20200510/miniupnpd.c
+===================================================================
+--- miniupnpd-2.1.20200510.orig/miniupnpd.c
++++ miniupnpd-2.1.20200510/miniupnpd.c
+@@ -126,6 +126,8 @@ volatile sig_atomic_t should_send_public
+ volatile sig_atomic_t should_rewrite_leasefile = 0;
+ #endif /* !TOMATO && ENABLE_LEASEFILE && LEASEFILE_USE_REMAINING_TIME */
+ 
++static int rc_db = 0;
++
+ #ifdef TOMATO
+ #if 1
+ /* Tomato specific code */
+@@ -1878,7 +1880,8 @@ init(int argc, char * * argv, struct run
+ #ifdef TOMATO
+ 	tomato_load();
+ #endif /* TOMATO */
+-
++	rc_db = init_log();
++	
+ 	return 0;
+ print_usage:
+ 	fprintf(stderr, "Usage:\n\t"
+@@ -3043,7 +3046,9 @@ shutdown:
+ #ifndef DISABLE_CONFIG_FILE
+ 	freeoptions();
+ #endif
+-
++	
++	close_log();
++	
+ 	shutdown_redirect();
+ 
+ 	return 0;
